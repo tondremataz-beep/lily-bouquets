@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Lily Bouquet</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; }
+  #hint { position: fixed; top: 8px; left: 0; right: 0; text-align: center;
+          font: 12px ui-monospace, Menlo, Consolas, monospace; color: #6b7080; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">click / tap / press R to regrow</div>
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- grid / world setup ---------- */
+  var COLS = 150, WW = 100, WH = 135;          // character columns, world width/height
+  var S = COLS / WW;                            // world -> offscreen pixel scale (x)
+  var ROWS0 = Math.ceil(WH * S / 2);            // rows used by the bouquet (chars are ~2x taller than wide)
+  var ROWS = ROWS0 + 11;                        // extra rows underneath for the caption
+  var BG = '#05060a';
+
+  var cv = document.getElementById('c');
+  var ctx = cv.getContext('2d');
+  var off = document.createElement('canvas');
+  off.width = COLS; off.height = ROWS;
+  var o = off.getContext('2d', { willReadFrequently: true });
+
+  /* ---------- helpers ---------- */
+  function rng(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var R = rng(11);
+  function rr(a, b) { return a + (b - a) * R(); }
+  function cl(x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+  function eo(x) { x = cl(x); return 1 - Math.pow(1 - x, 3); }
+  function eio(x) { x = cl(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
+  function qp(a, b, c, u) {
+    var v = 1 - u;
+    return [v * v * a[0] + 2 * v * u * b[0] + u * u * c[0],
+            v * v * a[1] + 2 * v * u * b[1] + u * u * c[1]];
+  }
+  function qt(a, b, c, u) {
+    var v = 1 - u;
+    return Math.atan2(2 * v * (b[1] - a[1]) + 2 * u * (c[1] - b[1]),
+                      2 * v * (b[0] - a[0]) + 2 * u * (c[0] - b[0]));
+  }
+
+  /* ---------- palettes: [dark base, mid, bright tip] ---------- */
+  var PAL = {
+    red:    ['#4a0510', '#c81426', '#ff4a52'],
+    pink:   ['#4a0a3a', '#c02b9a', '#ff7ad6'],
+    yellow: ['#6a5200', '#d8b41c', '#fff07a'],
+    cream:  ['#7a6850', '#e6dccb', '#ffffff'],
+    peach:  ['#6a3a22', '#d49a72', '#f6d4b6'],
+    crim:   ['#2a0408', '#8c1220', '#c8303c'],
+    violet: ['#3a0a40', '#a8309c', '#e07ad8']
+  };
+  var SPOTTED = { red: 1, pink: 1, peach: 1, crim: 1, violet: 1 };
+
+  /* ---------- the bouquet ---------- */
+  var BX = 50, BY = 131;
+  var F = [
+    { x: 38, y: 10, L: 8,  pal: 'pink',   rot: 0.3,  sq: 0.8,  z: 0 },
+    { x: 63, y: 12, L: 8,  pal: 'crim',   rot: -0.2, sq: 0.8,  z: 0 },
+    { x: 50, y: 20, L: 13, pal: 'peach',  rot: 0.4,  sq: 0.72, z: 1 },
+    { x: 30, y: 31, L: 15, pal: 'cream',  rot: -0.6, sq: 0.7,  z: 2 },
+    { x: 70, y: 30, L: 15, pal: 'yellow', rot: 0.5,  sq: 0.7,  z: 2 },
+    { x: 21, y: 53, L: 18, pal: 'yellow', rot: 0.2,  sq: 0.68, z: 3 },
+    { x: 79, y: 55, L: 19, pal: 'violet', rot: -0.4, sq: 0.72, z: 3 },
+    { x: 25, y: 92, L: 16, pal: 'yellow', rot: 0.8,  sq: 0.7,  z: 4 },
+    { x: 79, y: 93, L: 17, pal: 'crim',   rot: -0.3, sq: 0.7,  z: 4 },
+    { x: 46, y: 45, L: 26, pal: 'red',    rot: -0.25, sq: 0.82, z: 5 },
+    { x: 32, y: 70, L: 24, pal: 'pink',   rot: 0.35, sq: 0.8,  z: 6 },
+    { x: 62, y: 72, L: 24, pal: 'cream',  rot: -0.15, sq: 0.76, z: 7 },
+    { x: 47, y: 90, L: 22, pal: 'peach',  rot: 0.1,  sq: 0.8,  z: 8 }
+  ];
+
+  F.forEach(function (f, i) {
+    f.p0 = [BX + rr(-7, 7), BY];
+    f.p2 = [f.x, f.y];
+    f.p1 = [(f.p0[0] + f.x) / 2 + rr(-9, 9) + (f.x - BX) * 0.15,
+            (f.p0[1] + f.y) / 2 + rr(0, 10)];
+    f.d = i * 0.01;                                  // stem delay
+    f.bd = 0.52 + (i % 6) * 0.045 + rr(0, 0.03);     // bloom start
+    f.jit = []; f.pl = []; f.sp = [];
+    for (var k = 0; k < 6; k++) {
+      f.jit.push(rr(-0.12, 0.12));
+      f.pl.push(rr(0.9, 1.05));
+      var dots = [];
+      for (var m = 0; m < 7; m++) dots.push([rr(0.22, 0.7), rr(-0.55, 0.55)]);
+      f.sp.push(dots);
+    }
+    f.leaves = [];
+    var us = [0.3, 0.5, 0.7];
+    for (var q = 0; q < 3; q++) {
+      f.leaves.push({
+        u: us[q] + rr(-0.04, 0.04),
+        side: ((i + q) % 2 === 0) ? 1 : -1,
+        off: rr(0.7, 1.1),
+        len: rr(12, 20),
+        wd: rr(2.4, 3.4)
+      });
+    }
+  });
+  var FZ = F.slice().sort(function (a, b) { return a.z - b.z; });
+
+  /* grass-like blades */
+  var GREENS = [['#1f6a2a', '#7ed95e'], ['#2a7d2c', '#9be46a'], ['#1b5e24', '#62c653'], ['#33892f', '#b4f07a']];
+  var B = [];
+  for (var bi = 0; bi < 20; bi++) {
+    var bx = BX + rr(-12, 12), h = rr(26, 100), tx = bx + rr(-30, 30);
+    var g = GREENS[bi % GREENS.length];
+    B.push({
+      p0: [bx, 133],
+      p1: [bx + (tx - bx) * 0.3 + rr(-6, 6), 133 - h * 0.55],
+      p2: [tx, 133 - h],
+      w: rr(1.4, 2.6), d: bi * 0.008, front: h < 46, c: g[0], hi: g[1]
+    });
+  }
+
+  /* ---------- drawing primitives (offscreen) ---------- */
+  function drawStem(f, T) {
+    var g = eo((T - f.d) / 0.4);
+    if (g <= 0.001) return;
+    var N = 22, s, p;
+    o.lineCap = 'round'; o.lineJoin = 'round';
+    o.beginPath();
+    for (s = 0; s <= N; s++) {
+      p = qp(f.p0, f.p1, f.p2, g * s / N);
+      if (s === 0) o.moveTo(p[0], p[1]); else o.lineTo(p[0], p[1]);
+    }
+    o.strokeStyle = '#1f6a2a'; o.lineWidth = 2.0; o.stroke();
+    o.strokeStyle = '#58c04e'; o.lineWidth = 0.9; o.stroke();
+  }
+
+  function leafShape(len, wd, dark, light) {
+    var gr = o.createLinearGradient(0, 0, len, 0);
+    gr.addColorStop(0, dark); gr.addColorStop(1, light);
+    o.fillStyle = gr;
+    o.beginPath();
+    o.moveTo(0, 0);
+    o.quadraticCurveTo(len * 0.5, -wd, len, 0);
+    o.quadraticCurveTo(len * 0.5, wd, 0, 0);
+    o.fill();
+    o.strokeStyle = light; o.globalAlpha = 0.55; o.lineWidth = 0.35;
+    o.beginPath(); o.moveTo(len * 0.05, 0); o.lineTo(len * 0.9, 0); o.stroke();
+    o.globalAlpha = 1;
+  }
+
+  function drawLeaves(f, T) {
+    var g = eo((T - f.d) / 0.4);
+    for (var k = 0; k < f.leaves.length; k++) {
+      var lf = f.leaves[k];
+      var lp = eo((T - 0.18 - f.d - k * 0.06) / 0.3);
+      if (lp <= 0.01 || g < lf.u + 0.02) continue;
+      var p = qp(f.p0, f.p1, f.p2, lf.u);
+      var a = qt(f.p0, f.p1, f.p2, lf.u) + lf.side * lf.off;
+      o.save();
+      o.translate(p[0], p[1]); o.rotate(a);
+      leafShape(lf.len * lp, lf.wd * lp, '#1d5a26', '#66d25a');
+      o.restore();
+    }
+  }
+
+  function drawBlade(b, T) {
+    var g = eo((T - b.d) / 0.32);
+    if (g <= 0.03) return;
+    var N = 16, s, u, p, a, w, left = [], right = [];
+    for (s = 0; s <= N; s++) {
+      u = g * s / N;
+      p = qp(b.p0, b.p1, b.p2, u);
+      a = qt(b.p0, b.p1, b.p2, u) + Math.PI / 2;
+      w = b.w * Math.pow(1 - s / N, 0.75);
+      left.push([p[0] + Math.cos(a) * w, p[1] + Math.sin(a) * w]);
+      right.push([p[0] - Math.cos(a) * w, p[1] - Math.sin(a) * w]);
+    }
+    o.fillStyle = b.c;
+    o.beginPath();
+    o.moveTo(left[0][0], left[0][1]);
+    for (s = 1; s <= N; s++) o.lineTo(left[s][0], left[s][1]);
+    for (s = N; s >= 0; s--) o.lineTo(right[s][0], right[s][1]);
+    o.closePath(); o.fill();
+    o.strokeStyle = b.hi; o.globalAlpha = 0.6; o.lineWidth = 0.35;
+    o.beginPath();
+    for (s = 0; s <= N; s++) {
+      p = qp(b.p0, b.p1, b.p2, g * s / N);
+      if (s === 0) o.moveTo(p[0], p[1]); else o.lineTo(p[0], p[1]);
+    }
+    o.stroke(); o.globalAlpha = 1;
+  }
+
+  function petal(len, wd, c, dots, spotted) {
+    if (len <= 0.01) return;
+    var gr = o.createLinearGradient(0, 0, len, 0);
+    gr.addColorStop(0, c[0]); gr.addColorStop(0.45, c[1]); gr.addColorStop(1, c[2]);
+    o.fillStyle = gr;
+    o.beginPath();
+    o.moveTo(0, 0);
+    o.bezierCurveTo(len * 0.25, -wd * 1.15, len * 0.7, -wd * 1.0, len, 0);
+    o.bezierCurveTo(len * 0.7, wd * 1.0, len * 0.25, wd * 1.15, 0, 0);
+    o.fill();
+    o.strokeStyle = c[0]; o.globalAlpha = 0.5; o.lineWidth = 0.5;
+    o.beginPath(); o.moveTo(len * 0.08, 0); o.lineTo(len * 0.85, 0); o.stroke();
+    o.globalAlpha = 1;
+    if (spotted) {
+      o.fillStyle = c[0]; o.globalAlpha = 0.7;
+      for (var i = 0; i < dots.length; i++) {
+        o.beginPath();
+        o.arc(len * dots[i][0], wd * dots[i][1], 0.6, 0, 6.2832);
+        o.fill();
+      }
+      o.globalAlpha = 1;
+    }
+  }
+
+  function drawFlower(f, T) {
+    var bs = eo((T - f.d - 0.3) / 0.2);                 // bud size
+    if (bs <= 0.01) return;
+    var g = eo((T - f.d) / 0.4);
+    var pos = qp(f.p0, f.p1, f.p2, g);
+    var c = PAL[f.pal];
+    var p = eio((T - f.bd) / 0.4);                      // bloom amount
+
+    /* closed bud */
+    if (p < 0.4) {
+      var ang = qt(f.p0, f.p1, f.p2, g);
+      var bl = f.L * 0.6 * bs * (1 - p / 0.4);
+      if (bl > 0.2) {
+        o.save();
+        o.translate(pos[0], pos[1]); o.rotate(ang);
+        var gr = o.createLinearGradient(0, 0, bl, 0);
+        gr.addColorStop(0, '#2c7a30'); gr.addColorStop(0.35, c[1]); gr.addColorStop(1, c[2]);
+        o.fillStyle = gr;
+        o.beginPath();
+        o.moveTo(0, 0);
+        o.quadraticCurveTo(bl * 0.45, -bl * 0.34, bl, 0);
+        o.quadraticCurveTo(bl * 0.45, bl * 0.34, 0, 0);
+        o.fill();
+        o.restore();
+      }
+    }
+    if (p <= 0.01) return;
+
+    /* open lily: 3 outer + 3 inner petals, stamens */
+    var pe = eo(p * 1.15), Lf = f.L * pe, k, m, pass, a, len, wd;
+    o.save();
+    o.translate(pos[0], pos[1]);
+    o.rotate(f.rot + (1 - p) * 0.6);
+    o.scale(1, f.sq);
+    for (pass = 0; pass < 2; pass++) {
+      for (m = 0; m < 3; m++) {
+        k = pass * 3 + m;
+        a = (pass ? Math.PI / 3 : 0) + m * 2 * Math.PI / 3 + f.jit[k];
+        len = Lf * (pass ? 0.93 : 1) * f.pl[k];
+        wd = len * (pass ? 0.36 : 0.27);
+        o.save(); o.rotate(a);
+        petal(len, wd, c, f.sp[k], SPOTTED[f.pal] === 1);
+        o.restore();
+      }
+    }
+    o.fillStyle = '#8fc23c';
+    o.beginPath(); o.arc(0, 0, 1.2 * pe, 0, 6.2832); o.fill();
+    for (k = 0; k < 6; k++) {
+      a = k * Math.PI / 3 + 0.3 + f.jit[k];
+      len = f.L * 0.5 * pe * (0.8 + 0.2 * f.pl[k]);
+      var ex = Math.cos(a) * len, ey = Math.sin(a) * len;
+      o.strokeStyle = '#e8e0a0'; o.lineWidth = 0.35;
+      o.beginPath(); o.moveTo(0, 0); o.lineTo(ex, ey); o.stroke();
+      o.fillStyle = '#b5481c';
+      o.beginPath(); o.arc(ex, ey, 1.0 * pe, 0, 6.2832); o.fill();
+    }
+    o.restore();
+  }
+
+  function renderWorld(T, now) {
+    o.setTransform(1, 0, 0, 1, 0, 0);
+    o.clearRect(0, 0, COLS, ROWS);
+    o.setTransform(S, 0, 0, S / 2, 0, 0);
+    var sway = Math.sin(now * 0.0007) * 0.012 * cl(T);
+    o.translate(BX, 132); o.rotate(sway); o.translate(-BX, -132);
+
+    var i;
+    for (i = 0; i < B.length; i++) if (!B[i].front) drawBlade(B[i], T);
+    for (i = 0; i < F.length; i++) drawStem(F[i], T);
+    for (i = 0; i < F.length; i++) drawLeaves(F[i], T);
+    for (i = 0; i < FZ.length; i++) drawFlower(FZ[i], T);
+    for (i = 0; i < B.length; i++) if (B[i].front) drawBlade(B[i], T);
+  }
+
+  /* ---------- ASCII conversion ---------- */
+  var RAMP = ".`'-:;,~^+=*i!lI?/|1xXY%#&8$@".split('');
+  var NOISE = new Float32Array(COLS * ROWS);
+  for (var ni = 0; ni < NOISE.length; ni++) NOISE[ni] = R();
+
+  var STARS = [];
+  for (var si = 0; si < 90; si++) {
+    STARS.push({ i: Math.floor(R() * COLS), j: Math.floor(R() * ROWS0),
+                 ph: R() * 6.28, sp: 0.001 + R() * 0.003, ch: ['.', '.', '+', '*'][Math.floor(R() * 4)] });
+  }
+
+  var cw = 6, chh = 12, mainFont = '';
+  function fit() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    cw = Math.min(vw / COLS, vh / (ROWS * 2));
+    chh = cw * 2;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.style.width = (COLS * cw) + 'px';
+    cv.style.height = (ROWS * chh) + 'px';
+    cv.width = Math.round(COLS * cw * dpr);
+    cv.height = Math.round(ROWS * chh * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    mainFont = 'bold ' + (chh * 0.92) + 'px ui-monospace, Menlo, Consolas, "Courier New", monospace';
+    ctx.font = mainFont;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+  }
+
+  /* caption: big letters typed out after the bouquet blooms.
+     k = how many grid cells wide/tall each letter is; emoji take 2 letter-widths */
+  var CAP = [
+    { items: 'IN THE MOOD TO TAKE YOUR ABILITY TO WALK'.split(''), k: 3, row: ROWS0 + 1, rgb: '255,150,195' },
+    { items: 'LOVE YOU MAMI '.split('').concat(['\uD83D\uDC45', '\uD83E\uDE77']), k: 5, row: ROWS0 + 5, rgb: '255,226,120' }
+  ];
+  var CAP_START = 7600, CAP_STEP = 70;          // ms
+
+  function drawCaption(ms, now) {
+    var n = Math.floor((ms - CAP_START) / CAP_STEP);
+    if (n <= 0) return;
+    var pulse = 0.85 + 0.15 * Math.sin(now * 0.003);
+    for (var l = 0; l < CAP.length; l++) {
+      var line = CAP[l], k = line.k, units = 0, i, s, w;
+      for (i = 0; i < line.items.length; i++) units += line.items[i].length > 1 ? 2 : 1;
+      var x = (COLS - units * k) / 2;            // left edge, in grid cells
+      ctx.font = 'bold ' + (chh * k * 0.85) + 'px ui-monospace, Menlo, Consolas, "Courier New", monospace';
+      ctx.fillStyle = 'rgba(' + line.rgb + ',' + pulse.toFixed(2) + ')';
+      for (i = 0; i < line.items.length && n > 0; i++, n--) {
+        s = line.items[i];
+        w = s.length > 1 ? 2 : 1;
+        if (s !== ' ') ctx.fillText(s, (x + w * k / 2) * cw, (line.row + k / 2) * chh);
+        x += w * k;
+      }
+    }
+    ctx.font = mainFont;
+  }
+
+  function draw(T, now, ms) {
+    renderWorld(T, now);
+    var d = o.getImageData(0, 0, COLS, ROWS).data;
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, COLS * cw, ROWS * chh);
+
+    var i, j, k, a, r, g, b, lum, dens, idx;
+    for (j = 0; j < ROWS; j++) {
+      for (i = 0; i < COLS; i++) {
+        k = (j * COLS + i) * 4;
+        a = d[k + 3];
+        if (a < 36) continue;
+        r = d[k]; g = d[k + 1]; b = d[k + 2];
+        lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        dens = Math.pow(lum, 0.7) * 0.75 + 0.25 * (a / 255);
+        idx = Math.floor(dens * (RAMP.length - 1) + (NOISE[j * COLS + i] - 0.5) * 3);
+        if (idx < 0) idx = 0; else if (idx > RAMP.length - 1) idx = RAMP.length - 1;
+        ctx.fillStyle = 'rgba(' + Math.min(255, (r * 1.3 + 18) | 0) + ',' +
+                                  Math.min(255, (g * 1.3 + 18) | 0) + ',' +
+                                  Math.min(255, (b * 1.3 + 18) | 0) + ',' +
+                                  Math.min(1, 0.35 + (a / 255) * 0.9).toFixed(2) + ')';
+        ctx.fillText(RAMP[idx], (i + 0.5) * cw, (j + 0.5) * chh);
+      }
+    }
+    /* twinkling stars, only in empty cells */
+    for (var s = 0; s < STARS.length; s++) {
+      var st = STARS[s];
+      if (d[(st.j * COLS + st.i) * 4 + 3] >= 36) continue;
+      var tw = 0.15 + 0.85 * (0.5 + 0.5 * Math.sin(now * st.sp + st.ph));
+      ctx.fillStyle = 'rgba(190,200,235,' + tw.toFixed(2) + ')';
+      ctx.fillText(st.ch, (st.i + 0.5) * cw, (st.j + 0.5) * chh);
+    }
+    drawCaption(ms, now);
+  }
+
+  /* ---------- animation loop ---------- */
+  var t0 = null;
+  function frame(now) {
+    if (t0 === null) t0 = now;
+    var ms = now - t0;
+    var T = Math.min(ms / 8500, 1.25);
+    draw(T, now, ms);
+    requestAnimationFrame(frame);
+  }
+  function replay() { t0 = null; }
+
+  window.addEventListener('resize', fit);
+  window.addEventListener('click', replay);
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'r' || e.key === 'R' || e.key === ' ') replay();
+  });
+
+  fit();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
